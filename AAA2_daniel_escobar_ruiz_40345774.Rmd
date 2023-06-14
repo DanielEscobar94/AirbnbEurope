@@ -1,0 +1,1153 @@
+---
+title: "Advance analytics & Machine Learning - Assignment 2"
+author: "Daniel Escobar"
+date: "2023-05-02"
+output: 
+  pdf_document: default
+  xaringan::ninjutsu:
+    css:
+    - default
+    - chocolate
+    - "metropolis-fonts"
+  bookdown::pdf_document2:
+    template: MGT7179LatexTempV02.tex
+    keep_tex: yes
+author2: "40345774"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Data
+
+```{r 1, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library('readxl')
+library('data.table')
+library('dplyr')
+library('stringr')
+library('gplots')
+library('ggplot2')
+library('corrplot')
+library('fastDummies')
+library('lattice')
+library('caret')
+library('Matrix')
+library('glmnet')
+library('randomForest')
+library('e1071')
+```
+
+The first five rows of the data set provided:
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+##### Load file-----
+#things done: 
+#1. remove first column
+#2. set the right classes for each column
+
+dfraw <- read_excel("dataset-cities- Amsterdam- - Barcelona_ - Brussels_1 - student 54 .xlsx",
+                 col_types = c("skip", "numeric", "numeric",
+                               "date", "text", "text", "numeric", 
+                               "numeric", "numeric", "text", "numeric",
+                               "numeric", "numeric", "numeric",
+                               "text", "text", "numeric", "numeric",
+                               "text", "text", "numeric", "text",
+                               "text", "numeric", "text", "text",
+                               "numeric", "numeric", "numeric",
+                               "text", "numeric", "numeric", "numeric",
+                               "numeric", "numeric", "numeric",
+                               "date", "date", "numeric",
+                               "numeric", "numeric", "numeric",
+                               "numeric", "numeric", "numeric",
+                               "text", "numeric", "numeric", "text"))
+
+#View
+head(dfraw,5)
+```
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+cat("Rows and columns:",dim(dfraw),
+    "\nAny row duplicated?", any(duplicated(dfraw)))
+```
+
+# Exploring df, text clenaing, and spliting dfa and dfb
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+#Some cleaning and feature engineering 
+
+## clean text on city column
+df <- dfraw
+df$city <- ifelse(df$city == "Amsterdam-7Sep2022-listings (1).csv", "Amsterdam", df$city)
+df$city <- ifelse(df$city == "Barcelona_10_Sep_2022_listings (1).csv", "Barcelona", df$city)
+df$city <- ifelse(df$city == "Brussels_18_Sep_2022_listings (1).csv", "Brussels", df$city)
+
+#from dates keep only year. So data is not that fragmented and is easier to  manipulate
+df$host_since <- as.numeric(format(df$host_since, "%Y"))
+df$first_review <- as.numeric(format(df$first_review, "%Y"))
+df$last_review <- as.numeric(format(df$last_review, "%Y"))
+
+#replace "N/A" with NA object, so all missing values have the same format
+df[df == "N/A"] <- NA
+df[df == "NA"] <- NA
+
+#show the percentage of Nan for each column
+colMeans(is.na(df)) * 100
+```
+From the table above, only one column have more than 30% of missing values.
+Bathrooms column is full NA. Let's extract them from bathrooms_text, So, These both columns ends up with the same amount of missing values.
+
+In addition, For location  variable I have chosen neighbourhood_group_cleansed as it is less fragmented than neighbourhood. Also, I have complete their missing values extracting from neighbourhood and removing city and country name. This column ends without missing values.
+
+```{r, warning=FALSE, message=FALSE, echo=TRUE}
+
+#####Complete bathroom column-----------------------
+df$bathrooms <- ifelse(grepl("(shared|half|Half)", tolower(df$bathrooms_text)), 0,
+                       as.numeric(substr(df$bathrooms_text, 1, 1)))
+
+
+#####complete neighbourhood_group_cleansed column------
+
+# If empty replace fill with neighbourhood
+df$neighbourhood_group_cleansed <- ifelse(is.na(df$neighbourhood_group_cleansed),
+                                          df$neighbourhood,
+                                          df$neighbourhood_group_cleansed)
+
+# Remove cities, countries
+df$neighbourhood_group_cleansed <- gsub(
+  paste(c(
+    ", ", "Bruxelles", "Belgium", "Brussels", "Amsterdam", "Netherlands"),
+    collapse = "|"),
+  "", df$neighbourhood_group_cleansed)
+
+# if Value still missing fill with "Other"
+df$neighbourhood_group_cleansed <- ifelse(is.na(df$neighbourhood_group_cleansed),
+                                          "Other", df$neighbourhood_group_cleansed)
+
+# Remove special characters
+df$neighbourhood_group_cleansed <- gsub("[^[:alnum:] ]",
+                                        "", df$neighbourhood_group_cleansed)
+
+#####print proportion of NA------
+colMeans(is.na(df[, c("bathrooms", "bathrooms_text",
+                      "neighbourhood_group_cleansed")])) * 100
+```
+Column amenities contains lists. From them I extract the top 5 amenities most frequents in all the data set and create a dummy variable for each one.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+#create dummy variables for top 5 amenities
+
+#merge all lists in one vector
+amenities_concat <- paste(df$amenities, collapse = ",")
+
+# remove special characters
+amenities_concat <- gsub('\\[|\\]|\\"', "", amenities_concat)
+
+# create vector of top5 most frequent amenities 
+amenities_top5 <- sort(table(strsplit(amenities_concat, ", ")),
+                       decreasing=TRUE)[1:5]
+
+# create dummy for each top 5 amenity
+for (amenity in names(amenities_top5)) {
+  df[[amenity]] <- as.integer(grepl(amenity, df$amenities))
+}
+
+head(df[, (ncol(df) - 4):ncol(df)], n = 5)
+```
+
+The current data set includes columns that are not relevant in explaining price variation, such as host_id. Therefore, I removed them before proceeding with the analysis.
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+##### Remove columns------------
+df <- select(df, -c(
+  # id variables not useful to explain price variations
+  "id", "host_id", "host_has_profile_pic", "license",
+                    
+  # already using neighbourhood_group_cleansed as location variable
+  "neighbourhood", "latitude", "longitude",
+  "host_location","host_neighbourhood", 
+  
+  # already re-engineered
+  "bathrooms_text", "amenities", 
+  
+  # amenities already capture long satys
+  "maximum_nights",
+  
+  # constant
+  "calendar_updated", 
+  "has_availability"
+  ))
+```
+
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+#### Remove rows with NA values----------
+df <- na.omit(df)
+
+#### Remove spaces from values and column names--------
+
+# Get the column indices of the character columns
+char_cols <- sapply(df, is.character)
+
+# Replace spaces with underscores in character columns only
+df[, char_cols] <- lapply(df[, char_cols], function(x) gsub(" ", "_", x))
+
+# replace spaces by underscores in column names
+colnames(df) <- gsub(" ", "_", colnames(df))
+
+#### Remove "/" from values--------
+df <- df %>%
+  mutate(property_type = str_replace(property_type, "/", ""),
+         room_type = str_replace(room_type, "/", ""))
+
+#### force column bed to numeric---------
+df$beds <- as.numeric(df$beds)
+
+#### check dimension again and city frequencies
+paste("size of cleanned set:", dim(df)[1]/dim(dfraw)[1]*100,
+      "%"); table(df$city)
+```
+Subsets dfa will contain Barcelona and Amsterdam. While dfb, Amsterdam and Brussels.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+#create subsets a and b
+dfa <- subset(df, city != "Brussels") #for Barcelona and Amsterdam
+dfb <- subset(df, city != "Barcelona") #for Amsterdam and Brussels
+```
+
+\newpage
+
+# Analysisng subset dfa
+
+## Exploring and cleaning
+
+### Distribution plots for numerical variables
+
+As them data set contains many variables, lets plot some of them. (Chunks of code for plots are hidden on the pdf report to save space but they can be check on markdown file.)
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+###Distribution plots
+#price
+ggplot(data = dfa, aes(x = price)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("Price distribution") +
+  xlab("Price") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_since"
+ggplot(data = dfa, aes(x = host_since)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("host_since distribution") +
+  xlab("host_since") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"accommodates"
+ggplot(data = dfa, aes(x = accommodates)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("accommodates distribution") +
+  xlab("accommodates") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"bathrooms"
+ggplot(data = dfa, aes(x = bathrooms)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("bathrooms distribution") +
+  xlab("bathrooms") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"minimum_nights"
+ggplot(data = dfa, aes(x = minimum_nights)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("minimum_nights distribution") +
+  xlab("minimum_nights") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"number_of_reviews"
+ggplot(data = dfa, aes(x = number_of_reviews)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("number_of_reviews distribution") +
+  xlab("number_of_reviews") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"review_scores_rating"
+ggplot(data = dfa, aes(x = review_scores_rating)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("review_scores_rating distribution") +
+  xlab("review_scores_rating") +
+  ylab("Count")
+```
+
+The scatter-plots in the previous analysis revealed the presence of outliers, especially in the price and minimum nights columns, with values over 500 and 200, respectively. To avoid any bias during modeling, I have decided to remove these outliers. In the following analysis, we present the scatter-plots that show the distribution and relationship between these variables and the price column, as well as a heatmap illustrating the correlations among them.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+##### clean outliers----------------------------------
+dfa <- dfa[(dfa$price<=500) & (dfa$minimum_nights<=200),]
+```
+
+### Scatter plots for numerical variables
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_since"
+ggplot(dfa, aes(x = host_since, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and host_since")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"accommodates"
+ggplot(dfa, aes(x = accommodates, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and accommodates")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"bathrooms"
+ggplot(dfa, aes(x = bathrooms, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and bathrooms")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"minimum_nights"
+ggplot(dfa, aes(x = minimum_nights, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and minimum_nights")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"number_of_reviews"
+ggplot(dfa, aes(x = host_since, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and number_of_reviews")
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"review_scores_rating"
+ggplot(dfa, aes(x = review_scores_rating, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and review_scores_rating")
+
+```
+
+### Correlations for some of the numerical variables
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+### correlations
+#check Pearson correlations for numerical columns
+dfa_num <- dfa[, c("price", "host_since", "accommodates", 
+                   "bathrooms", "minimum_nights", 
+                   "number_of_reviews", "review_scores_rating")]
+
+corrplot(cor(dfa_num),
+         title="Pearson correlations",
+         mar=c(1,1,1,1),
+         type = "upper",
+         order = "hclust",
+         tl.col = "black",
+         tl.srt = 60)
+```
+
+### Distribution plots for categorical variables
+Now let's explores plots for the categorical variables.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"property_type Counts"
+ggplot(data = dfa, aes(x = reorder(property_type, -table(property_type)[property_type]))) +
+  geom_bar() +
+  ggtitle("Property_Type Counts") +
+  xlab("Property_Type") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_response_time "
+ggplot(data = dfa, aes(x = host_response_time, fill = host_response_time)) +
+  geom_bar() +
+  ggtitle("host_response_time distribution") +
+  xlab("host_response_time") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_identity_verified "
+ggplot(data = dfa, aes(x = host_identity_verified, fill = host_identity_verified)) +
+  geom_bar() +
+  ggtitle("host_identity_verified distribution") +
+  xlab("host_identity_verified") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"room_type"
+ggplot(data = dfa, aes(x = room_type, fill = room_type)) +
+  geom_bar() +
+  ggtitle("room_type distribution") +
+  xlab("room_type") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"neighbourhood_group_cleansed"
+ggplot(data = dfa, aes(x = reorder(neighbourhood_group_cleansed, -table(neighbourhood_group_cleansed)[neighbourhood_group_cleansed]))) +
+  geom_bar() +
+  ggtitle("neighbourhood_group_cleansed Counts") +
+  xlab("neighbourhood_group_cleansed") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+print(sort(table(dfa$neighbourhood_group_cleansed),
+           decreasing = TRUE)[1:10])
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"top5 amenities"
+dfa_amenities <- dfa[,c("Wifi", "Essentials", 
+                        "Long_term_stays_allowed",
+                        "Hair_dryer", "Heating")] 
+dfa_amenities_sum <- data.frame(
+  variable = colnames(dfa_amenities),
+  value = colSums(dfa_amenities))
+ggplot(data = dfa_amenities_sum, aes(x = variable, y = value)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  xlab("Amenities") +
+  ylab("Count") +
+  ggtitle("Count top 5 Amenities")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+These categorical variable have some issues. 
+
+property_type, host_identity_verified, and city are almost a constant because only one of their categories is present in most samples. This may create a problem since they do not add variability to the model. Thus, it is better to remove them
+
+In the case of neighbourhood_group_cleansed, host_response_time, and room_type, they are too fragmented. The least frequent must be grouped so the train test partition are less likely to have constant values for those categories least frequent.  
+
+The new categorical variables are as follow.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+##### Remove problematic columns----
+dfa <- select(dfa, -c("property_type",
+                      "host_identity_verified",
+                      "city"))
+
+#### Group least frequent categories----
+dfa <- dfa %>%
+  mutate(
+    neighbourhood_group_cleansed  = ifelse(
+      table(neighbourhood_group_cleansed )[as.character(
+        neighbourhood_group_cleansed)] < 400,
+      "Other", neighbourhood_group_cleansed ),
+    
+    host_response_time = ifelse(
+      table(host_response_time)[as.character(
+        host_response_time)] < 1000,
+      "More_than_an_hour", host_response_time),
+    
+    room_type = ifelse(
+      table(room_type)[as.character(
+        room_type)] < 2000,
+      "hotel_room_shared", room_type)
+  )
+
+#### Convert NA to "Other" for neighbourhood_group_cleansed----
+dfa$neighbourhood_group_cleansed <- ifelse(
+  is.na(dfa$neighbourhood_group_cleansed),
+  "Other", dfa$neighbourhood_group_cleansed) 
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_response_time "
+ggplot(data = dfa, aes(x = host_response_time, fill = host_response_time)) +
+  geom_bar() +
+  ggtitle("host_response_time distribution") +
+  xlab("host_response_time") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"room_type"
+ggplot(data = dfa, aes(x = room_type, fill = room_type)) +
+  geom_bar() +
+  ggtitle("room_type distribution") +
+  xlab("room_type") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"neighbourhood_group_cleansed"
+ggplot(data = dfa, aes(x = reorder(neighbourhood_group_cleansed, -table(neighbourhood_group_cleansed)[neighbourhood_group_cleansed]))) +
+  geom_bar() +
+  ggtitle("neighbourhood_group_cleansed Counts") +
+  xlab("neighbourhood_group_cleansed") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+## Modelling dfa
+
+First, we obtain dummy variables and select features using Lasso regression model with cross-validation and using also correlation coefficients. Then, we partition the data into train and test sets. Finally, we fit three different models for this analysis: a linear regression, a random forest, and a Support Vector Machine.
+
+### Get dummies
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+#vector of names of character columns
+dfa_char_cols <- names(dfa)[sapply(dfa, is.character)] 
+
+#create dummies and let first to be absorb in the intercept
+dfa_dummies <- dummy_cols(dfa, select_columns = dfa_char_cols,
+                          remove_first_dummy = TRUE) 
+
+#drop original character columns
+dfa_dummies <- dfa_dummies %>% select(-dfa_char_cols) 
+```
+
+
+### Lasso for column selection
+
+A Lasso regression cross-validated in 10 folds selects the next features to be include in the models.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# Extract predictors and response variable
+X <- scale(select(dfa_dummies, -c("price"))) #as matrix and standardized
+Y <- as.matrix(dfa_dummies[,c('price')])
+
+# Fit Lasso regression model with cross-validation
+set.seed(123)
+lasso_fit <- cv.glmnet(X, Y, alpha = 1, nfolds = 10)
+
+# Find the optimal value of lambda that minimizes the cross-validation error
+optimal_lambda <- lasso_fit$lambda.min
+
+# Get the coefficients for the optimal lambda
+lasso_coef <- coef(lasso_fit, s = optimal_lambda)
+
+# Print the names of the selected predictors
+selected_predictors <- rownames(lasso_coef)[which(lasso_coef != 0)]
+selected_predictors <- selected_predictors[-which(
+  selected_predictors =="(Intercept)")]
+print(selected_predictors)
+
+#keep only selected columns (normalized)
+dfa_colselect <- as.data.frame(X)
+dfa_colselect <- select(dfa_colselect, selected_predictors) 
+#add price column
+dfa_colselect <- cbind(dfa_dummies[,c('price')], dfa_colselect)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### correlations higher than 0.5
+
+After selecting variables with Lasso, it is important to check for collinearity among the selected features. Any pair of variables with a correlation coefficient above 0.5 can be considered highly collinear. To address this issue, I removed one variable from each highly correlated pair, except for the price variable.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# Compute the correlation matrix
+cor_matrix <- cor(dfa_colselect)
+
+# Get the indices of correlations greater than 0.5
+idx <- which(cor_matrix > 0.5 & upper.tri(cor_matrix, diag = FALSE),
+             arr.ind = TRUE)
+
+# Get the names of the columns with correlations greater than 0.5
+col_names <- colnames(dfa_colselect)
+
+# Print the correlations and column names
+for (i in seq_along(idx[,1])) {
+  print(paste(col_names[idx[i,1]], ",",
+              col_names[idx[i,2]], ", ",
+              round(cor_matrix[idx[i,1], idx[i,2]], 2)))
+}
+```
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# remove manually correlated columns
+dfa_colselect <- select(dfa_colselect,
+                        -c('host_response_rate',
+                           'host_listings_count',
+                           'accommodates',
+                           'bathrooms',
+                           'bedrooms',
+                           'availability_30',
+                           'availability_60',
+                           'host_since',
+                           'review_scores_rating',
+                           'review_scores_accuracy',
+                           'review_scores_cleanliness',
+                           'review_scores_checkin',
+                           'review_scores_communication',
+                           'review_scores_location',
+                           'number_of_reviews',
+                           'host_acceptance_rate'))
+```
+
+\newpage
+
+### Models
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+### Split train test
+
+set.seed(123)
+trainIndex <- createDataPartition(dfa_colselect$price, p = .7, list = FALSE)
+dfa_train <- dfa_colselect[ trainIndex, ]
+dfa_test <- dfa_colselect[-trainIndex, ]
+```
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+##### linear regression---------------------------------------------------------
+
+#fit on train set
+lm_model <- lm(price ~ .,
+               data = dfa_train)
+
+#predict the test set using the fitted model
+lm_pred <- predict(lm_model,
+                     newdata = dfa_test)
+
+# Evaluate model performance
+lm_rmse <- sqrt(mean((dfa_test$price - lm_pred)^2))
+print(paste("Lineal regression RMSE: ", round(lm_rmse, 2)))
+```
+
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+##### Random Forest-------------------------------------------------------------
+
+set.seed(123)
+rf_model <- randomForest(price ~ ., data = dfa_train, importance = TRUE)
+
+# Make predictions on test set
+rf_pred <- predict(rf_model, newdata = dfa_test)
+
+# Evaluate model performance
+rf_rmse <- sqrt(mean((dfa_test$price - rf_pred)^2))
+print(paste("Random Forest RMSE: ", round(rf_rmse, 2)))
+```
+
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+##### Support Vector Machine----------------------------------------------------
+
+set.seed(123)
+svm_model <- svm(price ~ ., 
+                 data = dfa_train, 
+                 kernel = "radial",
+                 cost = 10, 
+                 gamma = 0.1)
+
+# Make predictions on test set
+svm_pred <- predict(svm_model, newdata = dfa_test)
+
+# Evaluate model performance
+svm_rmse <- sqrt(mean((dfa_test$price - svm_pred)^2))
+print(paste("svm RMSE: ", round(svm_rmse, 2)))
+
+```
+
+The linear model shows the highest RMSE of 70, indicating that it has the worst performance among the three models. The SVM model has a slightly lower RMSE of 64.94, while the random forest model has the lowest RMSE of 57.22, indicating the best performance. Additionally, it's worth considering the complexity of the models and their ability to capture non-linear relationships. In this case, the linear model may be over fitted, as it cannot capture relationships beyond the second degree.
+
+\newpage
+
+# Analysisng subset dfb
+
+### Distribution plots for numerical variables
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+###Distribution plots
+#price
+ggplot(data = dfb, aes(x = price)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("Price distribution") +
+  xlab("Price") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_since"
+ggplot(data = dfb, aes(x = host_since)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("host_since distribution") +
+  xlab("host_since") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"accommodates"
+ggplot(data = dfb, aes(x = accommodates)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("accommodates distribution") +
+  xlab("accommodates") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"bathrooms"
+ggplot(data = dfb, aes(x = bathrooms)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("bathrooms distribution") +
+  xlab("bathrooms") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"minimum_nights"
+ggplot(data = dfb, aes(x = minimum_nights)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("minimum_nights distribution") +
+  xlab("minimum_nights") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"number_of_reviews"
+ggplot(data = dfb, aes(x = number_of_reviews)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("number_of_reviews distribution") +
+  xlab("number_of_reviews") +
+  ylab("Count")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"review_scores_rating"
+ggplot(data = dfb, aes(x = review_scores_rating)) +
+  geom_histogram(bins = 30, color = "black", fill = "gray") +
+  ggtitle("review_scores_rating distribution") +
+  xlab("review_scores_rating") +
+  ylab("Count")
+```
+
+I perform same outliers cleaning for this subset.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+##### clean outliers----------------------------------
+dfb <- dfb[(dfb$price<=500) & (dfb$minimum_nights<=200),]
+```
+
+### Scatter plots for numerical variables
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_since"
+ggplot(dfb, aes(x = host_since, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and host_since")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"accommodates"
+ggplot(dfb, aes(x = accommodates, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and accommodates")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"bathrooms"
+ggplot(dfb, aes(x = bathrooms, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and bathrooms")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"minimum_nights"
+ggplot(dfb, aes(x = minimum_nights, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and minimum_nights")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"number_of_reviews"
+ggplot(dfb, aes(x = host_since, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and number_of_reviews")
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"review_scores_rating"
+ggplot(dfb, aes(x = review_scores_rating, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of Price and review_scores_rating")
+
+```
+
+### Correlations for some of the numerical variables
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+### correlations
+#check Pearson correlations for numerical columns
+dfb_num <- dfb[, c("price", "host_since", "accommodates", 
+                   "bathrooms", "minimum_nights", 
+                   "number_of_reviews", "review_scores_rating")]
+
+corrplot(cor(dfb_num),
+         title="Pearson correlations",
+         mar=c(1,1,1,1),
+         type = "upper",
+         order = "hclust",
+         tl.col = "black",
+         tl.srt = 60)
+```
+
+### Distribution plots for categorical variables
+Now let's explores plots for the categorical variables.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"property_type Counts"
+ggplot(data = dfb, aes(x = reorder(property_type, -table(property_type)[property_type]))) +
+  geom_bar() +
+  ggtitle("Property_Type Counts") +
+  xlab("Property_Type") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_response_time "
+ggplot(data = dfb, aes(x = host_response_time, fill = host_response_time)) +
+  geom_bar() +
+  ggtitle("host_response_time distribution") +
+  xlab("host_response_time") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_identity_verified "
+ggplot(data = dfb, aes(x = host_identity_verified, fill = host_identity_verified)) +
+  geom_bar() +
+  ggtitle("host_identity_verified distribution") +
+  xlab("host_identity_verified") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"room_type"
+ggplot(data = dfb, aes(x = room_type, fill = room_type)) +
+  geom_bar() +
+  ggtitle("room_type distribution") +
+  xlab("room_type") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"neighbourhood_group_cleansed"
+ggplot(data = dfb, aes(x = reorder(neighbourhood_group_cleansed, -table(neighbourhood_group_cleansed)[neighbourhood_group_cleansed]))) +
+  geom_bar() +
+  ggtitle("neighbourhood_group_cleansed Counts") +
+  xlab("neighbourhood_group_cleansed") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+print(sort(table(dfb$neighbourhood_group_cleansed),
+           decreasing = TRUE)[1:10])
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"top5 amenities"
+dfb_amenities <- dfb[,c("Wifi", "Essentials", 
+                        "Long_term_stays_allowed",
+                        "Hair_dryer", "Heating")] 
+dfb_amenities_sum <- data.frame(
+  variable = colnames(dfb_amenities),
+  value = colSums(dfb_amenities))
+ggplot(data = dfb_amenities_sum, aes(x = variable, y = value)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  xlab("Amenities") +
+  ylab("Count") +
+  ggtitle("Count top 5 Amenities")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Categories are group as they were for dfa
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+##### Remove problematic columns----
+dfb <- select(dfb, -c("property_type",
+                      "host_identity_verified",
+                      "city"))
+
+#### Group least frequent categories----
+dfb <- dfb %>%
+  mutate(
+    neighbourhood_group_cleansed  = ifelse(
+      table(neighbourhood_group_cleansed )[as.character(
+        neighbourhood_group_cleansed)] < 25,
+      "Other", neighbourhood_group_cleansed ),
+    
+    host_response_time = ifelse(
+      table(host_response_time)[as.character(
+        host_response_time)] < 100,
+      "More_than_an_hour", host_response_time),
+    
+    room_type = ifelse(
+      table(room_type)[as.character(
+        room_type)] < 100,
+      "hotel_room_shared", room_type)
+  )
+
+#### Convert NA to "Other" for neighbourhood_group_cleansed----
+dfb$neighbourhood_group_cleansed <- ifelse(
+  is.na(dfb$neighbourhood_group_cleansed),
+  "Other", dfb$neighbourhood_group_cleansed) 
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"host_response_time "
+ggplot(data = dfb, aes(x = host_response_time, fill = host_response_time)) +
+  geom_bar() +
+  ggtitle("host_response_time distribution") +
+  xlab("host_response_time") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"room_type"
+ggplot(data = dfb, aes(x = room_type, fill = room_type)) +
+  geom_bar() +
+  ggtitle("room_type distribution") +
+  xlab("room_type") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width="60%"}
+#"neighbourhood_group_cleansed"
+ggplot(data = dfb, aes(x = reorder(neighbourhood_group_cleansed, -table(neighbourhood_group_cleansed)[neighbourhood_group_cleansed]))) +
+  geom_bar() +
+  ggtitle("neighbourhood_group_cleansed Counts") +
+  xlab("neighbourhood_group_cleansed") +
+  ylab("Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+## Modelling dfb
+
+Steps performed:
+1. Convert categorical variable to dummies
+2. Feature selection by lasso regression
+3. Feature selection by pearson correlations
+4. split train test
+5. Model Lm, RF, and SVM 
+
+### Get dummies
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#vector of names of character columns
+dfb_char_cols <- names(dfb)[sapply(dfb, is.character)] 
+
+#create dummies and let first to be absorb in the intercept
+dfb_dummies <- dummy_cols(dfb, select_columns = dfb_char_cols,
+                          remove_first_dummy = TRUE) 
+
+#drop original character columns
+dfb_dummies <- dfb_dummies %>% select(-dfb_char_cols) 
+```
+
+
+### Lasso for column selection
+
+A Lasso regression cross-validated in 10 folds selects the next features to be include in the models.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Extract predictors and response variable
+X <- scale(select(dfb_dummies, -c("price"))) #as matrix and standardized
+Y <- as.matrix(dfb_dummies[,c('price')])
+
+# Fit Lasso regression model with cross-validation
+set.seed(123)
+lasso_fit <- cv.glmnet(X, Y, alpha = 1, nfolds = 10)
+
+# Find the optimal value of lambda that minimizes the cross-validation error
+optimal_lambda <- lasso_fit$lambda.min
+
+# Get the coefficients for the optimal lambda
+lasso_coef <- coef(lasso_fit, s = optimal_lambda)
+
+# Print the names of the selected predictors
+selected_predictors <- rownames(lasso_coef)[which(lasso_coef != 0)]
+selected_predictors <- selected_predictors[-which(
+  selected_predictors =="(Intercept)")]
+print(selected_predictors)
+
+#keep only selected columns (normalized)
+dfb_colselect <- as.data.frame(X)
+dfb_colselect <- select(dfb_colselect, selected_predictors) 
+#add price column
+dfb_colselect <- cbind(dfb_dummies[,c('price')], dfb_colselect)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### correlations higher than 0.5
+
+To avoid collinearity among features. I removed one variable from each highly correlated pair (above 0.5), except for the price variable.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Compute the correlation matrix
+cor_matrix <- cor(dfb_colselect)
+
+# Get the indices of correlations greater than 0.5
+idx <- which(cor_matrix > 0.5 & upper.tri(cor_matrix, diag = FALSE),
+             arr.ind = TRUE)
+
+# Get the names of the columns with correlations greater than 0.5
+col_names <- colnames(dfb_colselect)
+
+# Print the correlations and column names
+for (i in seq_along(idx[,1])) {
+  print(paste(col_names[idx[i,1]], ",",
+              col_names[idx[i,2]], ", ",
+              round(cor_matrix[idx[i,1], idx[i,2]], 2)))
+}
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# remove manually correlated columns
+dfb_colselect <- select(dfb_colselect,
+                        -c('accommodates',
+                           'bedrooms',
+                           'review_scores_rating',
+                           'review_scores_cleanliness',
+                           'host_acceptance_rate'
+                           ))
+```
+
+
+### Models
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+### Split train test
+
+set.seed(123)
+trainIndex <- createDataPartition(dfb_colselect$price, p = .7, list = FALSE)
+dfb_train <- dfb_colselect[ trainIndex, ]
+dfb_test <- dfb_colselect[-trainIndex, ]
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+##### linear regression------
+
+#fit on train set
+lm_model <- lm(price ~ .,
+               data = dfb_train)
+
+#predict the test set using the fitted model
+lm_pred <- predict(lm_model,
+                     newdata = dfb_test)
+
+# Evaluate model performance
+lm_rmse <- sqrt(mean((dfb_test$price - lm_pred)^2))
+print(paste("Lineal regression RMSE: ", round(lm_rmse, 2)))
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+##### Random Forest-----
+
+set.seed(123)
+rf_model <- randomForest(price ~ ., data = dfb_train, importance = TRUE)
+
+# Make predictions on test set
+rf_pred <- predict(rf_model, newdata = dfb_test)
+
+# Evaluate model performance
+rf_rmse <- sqrt(mean((dfb_test$price - rf_pred)^2))
+print(paste("Random Forest RMSE: ", round(rf_rmse, 2)))
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+##### Support Vector Machine-----
+
+set.seed(123)
+svm_model <- svm(price ~ ., 
+                 data = dfb_train, 
+                 kernel = "radial",
+                 cost = 10, 
+                 gamma = 0.1)
+
+# Make predictions on test set
+svm_pred <- predict(svm_model, newdata = dfb_test)
+
+# Evaluate model performance
+svm_rmse <- sqrt(mean((dfb_test$price - svm_pred)^2))
+print(paste("svm RMSE: ", round(svm_rmse, 2)))
+
+```
+
+
+
+\newpage
+
+# References
+
+James, G., Witten, D., Hastie, T. & Tibshirani, R. (2013) Springer Texts in Statistics An Introduction to Statistical Learning. Springer New York Heidelberg Dordrecht London.
+
+OpenAI. (2021). ChatGPT [Computer software]. https://openai.com/
